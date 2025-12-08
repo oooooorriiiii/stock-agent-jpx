@@ -1,0 +1,21 @@
+# Binaries
+/stock-agent-jpx
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# Environment Variables
+.env
+
+# Output Data
+*.csv
+
+# OS / Editor specific
+.DS_Store
+.vscode/
+.idea/
+
+# Go Mod (Vendor directory if used)
+vendor/
