@@ -36,7 +36,7 @@ func main() {
 	jq := jquants.NewClient(cfg.JQuantsRefreshToken)
 	
 	// 検証したい日付（過去日付でテストする場合はここを変える）
-	targetDate := "2025-06-25" 
+	targetDate := "2025-06-26" 
 	log.Printf("Target Date: %s", targetDate)
 	
 	statements, err := jq.GetStatements(targetDate)
@@ -57,8 +57,8 @@ func main() {
 
 		// レートリミット対策
 		if i > 0 {
-			log.Println("Sleeping 15s...")
-			time.Sleep(15 * time.Second)
+			log.Println("Sleeping 5s...")
+			time.Sleep(5 * time.Second)
 		}
 
 		// 分析実行

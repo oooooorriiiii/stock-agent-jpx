@@ -67,7 +67,6 @@ type FinancialStatement struct {
 	NextYearForecastOperatingProfit string `json:"NextYearForecastOperatingProfit"`
 }
 
-// 修正: targetDate引数を追加
 func (c *Client) GetStatements(targetDate string) ([]FinancialStatement, error) {
 	if c.IDToken == "" {
 		if err := c.Authenticate(); err != nil {
@@ -101,4 +100,48 @@ func (c *Client) GetStatements(targetDate string) ([]FinancialStatement, error) 
 		return nil, err
 	}
 	return result.Statements, nil
+}
+
+// 株価データの構造体
+type DailyQuote struct {
+	Date  string  `json:"Date"`
+	Open  float64 `json:"Open"`
+	High  float64 `json:"High"`
+	Low   float64 `json:"Low"`
+	Close float64 `json:"Close"`
+}
+
+// 指定した銘柄の株価を取得（日付範囲指定）
+// API仕様: /prices/daily_quotes?code=xxxx&from=yyyy-mm-dd&to=yyyy-mm-dd
+func (c *Client) GetDailyQuotes(code string, fromDate string, toDate string) ([]DailyQuote, error) {
+	if c.IDToken == "" {
+		if err := c.Authenticate(); err != nil {
+			return nil, err
+		}
+	}
+
+	url := fmt.Sprintf("%s/prices/daily_quotes?code=%s&from=%s&to=%s", BaseURL, code, fromDate, toDate)
+
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer "+c.IDToken)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("api error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		DailyQuotes []DailyQuote `json:"daily_quotes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.DailyQuotes, nil
 }
