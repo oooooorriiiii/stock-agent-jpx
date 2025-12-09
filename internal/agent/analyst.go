@@ -4,118 +4,156 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/runner"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
+	
 	"github.com/oooooorriiiii/stock-agent-jpx/internal/jquants"
 )
+
+// サービスの構造体
+type StockAnalyzer struct {
+	runner         *runner.Runner
+	sessionService session.Service
+	userID         string
+}
 
 type Evaluation struct {
 	Ticker     string  `json:"ticker"`
 	Action     string  `json:"action"`
 	Confidence float64 `json:"confidence"`
 	Reasoning  string  `json:"reasoning"`
+	PromptID   string  `json:"-"` // JSONからは読み込まないが、CSV出力用に構造体に持たせる
 }
 
-func Analyze(ctx context.Context, apiKey string, data jquants.FinancialStatement) (*Evaluation, error) {
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey: apiKey,
+// 初期化関数 (ここでModelやToolのセットアップを1回だけ行う)
+func NewStockAnalyzer(ctx context.Context, apiKey string, jq *jquants.Client) (*StockAnalyzer, error) {
+	// 1. Model初期化
+	clientConfig := &genai.ClientConfig{APIKey: apiKey}
+	model, err := gemini.NewModel(ctx, "gemini-2.5-pro", clientConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create model: %w", err)
+	}
+
+	// 2. Tool初期化 (jqクライアントを注入)
+	trendToolInstance := &PriceTrendTool{Client: jq}
+	
+	trendTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "get_price_trend",
+			Description: "Get recent stock price trend to filter out downtrends.",
+		},
+		trendToolInstance.Execute, // メソッドをハンドラとして渡す
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tool: %w", err)
+	}
+
+	// 3. Agent初期化
+	sysPrompt := `
+You are an AI Trader. Goal: Find stocks with Good Earnings AND Good Technical Trend.
+Workflow:
+1. Analyze Earnings: Check Profit Growth/Guidance.
+2. Check Trend (Tool): IF earnings good, CALL "get_price_trend".
+3. Decision:
+   - Earnings Good + Trend UPTREND/FLAT -> BUY
+   - Earnings Good + Trend DOWNTREND -> IGNORE
+   - Earnings Bad -> IGNORE
+Output JSON: {"ticker": string, "action": "BUY"|"IGNORE", "confidence": float, "reasoning": string}
+`
+	traderAgent, err := llmagent.New(llmagent.Config{
+		Name:        "ai_trader",
+		Model:       model,
+		Instruction: sysPrompt,
+		Tools:       []tool.Tool{trendTool},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("genai client init error: %w", err)
+		return nil, fmt.Errorf("failed to create agent: %w", err)
 	}
 
-	modelName := "gemini-2.5-pro" 
-
-	// === ガイダンス重視（Guidance Growth）プロンプト ===
-	sysPrompt := `
-You are a "Growth Hunter" AI trader.
-Your sole objective is to identify stocks where the **Future Guidance (Forecast)** has been revised upward, causing institutional buying pressure throughout the day.
-
-# Critical Rule: "Don't Buy the Peak"
-- If a company reports good current results but the "Next Year Forecast" is weak or flat, the stock will likely "Gap Up and Sell Off". **IGNORE** these.
-- Only BUY if the **Future Forecast** implies accelerating growth.
-
-# Evaluation Criteria (Priority Order):
-1. **Guidance Growth**: Is "Next Year Forecast" significantly higher than "Current Result"? (e.g., +10% growth).
-2. **Profit Margin**: Is the Operating Profit Margin improving? (Profit/Sales ratio).
-3. **Surprise Factor**: Did they beat the current forecast by a wide margin?
-
-# Output Requirement:
-Output MUST be in strict JSON format:
-{"ticker": string, "action": "BUY"|"IGNORE", "confidence": float, "reasoning": string}
-
-- "action": "BUY" only if you predict sustained buying after the open.
-- "confidence": > 0.8 for BUY.
-`
-
-	// ユーザープロンプト（計算補助を追加）
-	userPrompt := fmt.Sprintf(`
-Analyze Ticker: %s
-Disclosed Date: %s
-
-[Result (Recent)]
-Sales: - (Not provided in summary)
-Op Profit: %s JPY
-
-[Forecast (Current FY)]
-Sales: %s JPY
-Op Profit: %s JPY
-
-[Forecast (Next FY)]
-Sales: %s JPY
-Op Profit: %s JPY
-
-Instruction:
-Compare [Forecast (Next FY)] vs [Result (Recent)] or [Forecast (Current FY)].
-If the Next FY Op Profit is NOT higher than the Current FY Op Profit, output IGNORE immediately.
-`, 
-		data.LocalCode, data.DisclosedDate, 
-		data.OperatingProfit,
-		data.ForecastNetSales, data.ForecastOperatingProfit,
-		data.NextYearForecastNetSales, data.NextYearForecastOperatingProfit,
-	)
-
-	resp, err := client.Models.GenerateContent(ctx, modelName, 
-		genai.Text(userPrompt), 
-		&genai.GenerateContentConfig{
-			SystemInstruction: &genai.Content{
-				Parts: []*genai.Part{{Text: sysPrompt}},
-			},
-			ResponseMIMEType: "application/json", 
-		},
-	)
+	// 4. Runner初期化
+	sessService := session.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:        "stock_analysis_app",
+		Agent:          traderAgent,
+		SessionService: sessService,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("generate content error: %w", err)
+		return nil, fmt.Errorf("failed to create runner: %w", err)
 	}
 
-	if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-		return nil, fmt.Errorf("empty response from model")
-	}
+	return &StockAnalyzer{
+		runner:         r,
+		sessionService: sessService,
+		userID:         "system_analyzer",
+	}, nil
+}
 
-	var responseText string
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if part != nil {
-			responseText += part.Text
+// 分析実行関数
+// 1回の呼び出しごとに新しいセッションを作成・破棄して、前の銘柄の会話履歴を引きずらないようにします
+func (s *StockAnalyzer) Analyze(ctx context.Context, data jquants.FinancialStatement) (*Evaluation, error) {
+	// セッションIDの生成 (銘柄ごとにユニークにするか、都度生成)
+	// ここではシンプルに毎回新規セッションを作成
+	sess, err := s.sessionService.Create(ctx, &session.CreateRequest{
+		AppName: "stock_analysis_app",
+		UserID:  s.userID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("session create error: %w", err)
+	}
+	// 関数の最後でセッションを削除（履歴クリアのため）
+	defer s.sessionService.Delete(ctx, &session.DeleteRequest{SessionID: sess.Session.ID()})
+
+	// プロンプト作成
+	userPrompt := fmt.Sprintf(`
+Analyze Ticker: %s (Date: %s)
+Op Profit: %s (Forecast: %s)
+Next Year Op Profit: %s
+`, data.LocalCode, data.DisclosedDate, data.OperatingProfit, data.ForecastOperatingProfit, data.NextYearForecastOperatingProfit)
+
+	// 実行
+	events := s.runner.Run(
+		ctx,
+		s.userID,
+		sess.Session.ID(),
+		genai.NewContentFromText(userPrompt, genai.RoleUser),
+		agent.RunConfig{StreamingMode: agent.StreamingModeNone},
+	)
+
+	// 結果の取得とパース
+	var lastText string
+	for event, err := range events {
+		if err != nil {
+			return nil, fmt.Errorf("agent run error: %w", err)
+		}
+		if len(event.Content.Parts) > 0 {
+			lastText = event.Content.Parts[0].Text
 		}
 	}
 
-	// JSONパース処理
-	cleanJSON := strings.TrimSpace(responseText)
-	cleanJSON = strings.TrimPrefix(cleanJSON, "```json")
-	cleanJSON = strings.TrimPrefix(cleanJSON, "```")
-	cleanJSON = strings.TrimSuffix(cleanJSON, "```")
-	if idx := strings.Index(cleanJSON, "{"); idx != -1 {
-		cleanJSON = cleanJSON[idx:]
+	// JSON部分の抽出とパース
+	return parseJSONResponse(lastText)
+}
+
+func parseJSONResponse(text string) (*Evaluation, error) {
+	// マークダウンの ```json ... ``` を除去する簡易処理
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start == -1 || end == -1 {
+		return nil, fmt.Errorf("no json found in response: %s", text)
 	}
+	jsonStr := text[start : end+1]
 
 	var eval Evaluation
-	if err := json.Unmarshal([]byte(cleanJSON), &eval); err != nil {
-		fmt.Fprintf(os.Stderr, "JSON Parse Error. Raw: %s\n", responseText)
-		return nil, fmt.Errorf("json parse error: %w", err)
+	if err := json.Unmarshal([]byte(jsonStr), &eval); err != nil {
+		return nil, fmt.Errorf("json unmarshal error: %w", err)
 	}
-	eval.Ticker = data.LocalCode
-
 	return &eval, nil
 }

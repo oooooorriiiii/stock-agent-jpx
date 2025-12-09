@@ -15,75 +15,89 @@ import (
 
 func main() {
 	cfg := config.Load()
-	
-	// === CSVファイルの準備 ===
-	file, err := os.OpenFile("results.csv", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Fatalf("Cannot create csv file: %v", err)
-	}
+
+	// === 期間指定の設定 ===
+	startDateStr := "2025-06-20"
+	endDateStr := "2025-06-30" 
+	// ===================
+
+	// CSV準備（PromptID列を追加）
+	file, _ := os.OpenFile("results.csv", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	defer file.Close()
-	
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	// ファイルが空ならヘッダーを書き込む
 	stat, _ := file.Stat()
 	if stat.Size() == 0 {
-		writer.Write([]string{"Date", "Ticker", "Action", "Confidence", "Reasoning"})
+		writer.Write([]string{"Date", "Ticker", "Action", "Confidence", "Reasoning", "PromptID"})
 	}
-	// ======================
-
-	jq := jquants.NewClient(cfg.JQuantsRefreshToken)
-	
-	// 検証したい日付（過去日付でテストする場合はここを変える）
-	targetDate := "2025-07-02" 
-	log.Printf("Target Date: %s", targetDate)
-	
-	statements, err := jq.GetStatements(targetDate)
-	if err != nil {
-		log.Fatalf("J-Quants API Error: %v", err)
-	}
-
-	log.Printf("Fetched %d statements.", len(statements))
 
 	ctx := context.Background()
-	log.Println("Starting analysis...")
 
-	for i, s := range statements {
-		// フィルタリング
-		if s.OperatingProfit == "" {
-			continue
-		}
+	// 1. J-Quants Clientの初期化
+	jq := jquants.NewClient(cfg.JQuantsRefreshToken)
 
-		// レートリミット対策
-		if i > 0 {
-			log.Println("Sleeping 5s...")
-			time.Sleep(5 * time.Second)
-		}
-
-		// 分析実行
-		eval, err := agent.Analyze(ctx, cfg.GoogleAPIKey, s)
-		if err != nil {
-			log.Printf("Error [%s]: %v", s.LocalCode, err)
-			continue
-		}
-
-		// コンソール出力
-		log.Printf("[%s] %s (%.2f): %s", eval.Ticker, eval.Action, eval.Confidence, eval.Reasoning)
-
-		// === CSVへの書き込み ===
-		record := []string{
-			targetDate,
-			eval.Ticker,
-			eval.Action,
-			fmt.Sprintf("%.2f", eval.Confidence),
-			eval.Reasoning,
-		}
-		if err := writer.Write(record); err != nil {
-			log.Printf("CSV Write Error: %v", err)
-		}
-		writer.Flush() // 都度書き込み（途中で落ちても大丈夫なように）
+	// 2. Analyzer (Agent) の初期化 【ここを追加】
+	// ループの外で一度だけ作成することで、モデル定義やTool設定のオーバーヘッドを削減します
+	analyzer, err := agent.NewStockAnalyzer(ctx, cfg.GoogleAPIKey, jq)
+	if err != nil {
+		log.Fatalf("Failed to initialize StockAnalyzer: %v", err)
 	}
 
-	log.Println("Done. Results saved to results.csv")
+	// 日付ループ
+	start, _ := time.Parse("2006-01-02", startDateStr)
+	end, _ := time.Parse("2006-01-02", endDateStr)
+
+	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+		targetDate := d.Format("2006-01-02")
+		log.Printf("--- Processing Date: %s ---", targetDate)
+
+		statements, err := jq.GetStatements(targetDate)
+		if err != nil {
+			log.Printf("Failed to fetch data for %s: %v", targetDate, err)
+			continue
+		}
+
+		if len(statements) == 0 {
+			log.Printf("No statements found for %s (Holiday or no disclosure). Skipping.", targetDate)
+			continue
+		}
+
+		log.Printf("Found %d statements.", len(statements))
+
+		for _, s := range statements {
+			if s.OperatingProfit == "" {
+				continue
+			}
+
+			// レートリミット (Tier 1)
+			time.Sleep(5 * time.Second)
+
+			// 3. Analyzeの実行 【ここを変更】
+			// インスタンスメソッドとして呼び出します。jqなどは初期化時に渡済みなので引数が減ります。
+			eval, err := analyzer.Analyze(ctx, s)
+			if err != nil {
+				log.Printf("Error [%s]: %v", s.LocalCode, err)
+				continue
+			}
+
+			if eval.Action == "BUY" {
+				log.Printf("🚀 [%s] BUY (Conf: %.2f): %s", eval.Ticker, eval.Confidence, eval.Reasoning)
+			} else {
+				log.Printf("💤 [%s] IGNORE: %s", eval.Ticker, eval.Reasoning)
+			}
+
+			// CSV書き込み
+			writer.Write([]string{
+				targetDate,
+				eval.Ticker,
+				eval.Action,
+				fmt.Sprintf("%.2f", eval.Confidence),
+				eval.Reasoning,
+				eval.PromptID, // SessionIDなどが入る想定
+			})
+			writer.Flush()
+		}
+	}
+	log.Println("Batch Analysis Completed.")
 }
