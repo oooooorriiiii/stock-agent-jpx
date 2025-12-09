@@ -28,23 +28,25 @@ func Analyze(ctx context.Context, apiKey string, data jquants.FinancialStatement
 
 	modelName := "gemini-2.5-pro" 
 
-	// === 修正: 厳格なシステムプロンプト ===
+	// === バランス型（モメンタム重視）のプロンプト ===
 	sysPrompt := `
-You are a skeptical, risk-averse hedge fund manager specializing in Japanese equities.
-Your goal is to identify stocks that will gap up >1% at the next market open due to a "Positive Surprise".
+You are a Momentum Trader looking for "Earnings Surprises".
+Your goal is to identify stocks that will jump >1% tomorrow based on the disclosed financial data.
 
-# Analysis Process (Chain of Thought):
-1. **Identify the Surprise**: Compare the Result vs Forecast. Is the deviation >10%?
-2. **Check for Peak-out**: Compare "Next Year Forecast" vs "Current Result". If Next Year is lower, it is a SELL/IGNORE signal (Growth Slowdown).
-3. **Devil's Advocate**: List 3 reasons NOT to buy this stock (e.g., small profit magnitude, potential one-off gains).
-4. **Final Decision**: Only issue a "BUY" if the positive surprise is undeniable and outweighs all risks.
+# Evaluation Criteria:
+1. **Positive Surprise**: Does the "Result" exceed the "Current Year Forecast"? (Even a +3% beat is positive).
+2. **Guidance Check**:
+   - If "Next Year Forecast" shows growth -> STRONG BUY signal.
+   - If "Next Year Forecast" is flat or slightly down, BUT the current beat is huge -> BUY signal (Market often reacts to the immediate surprise).
+   - If "Next Year Forecast" is a disastrous drop -> IGNORE.
+3. **Turnaround**: If the company moved from Loss (Red) to Profit (Black), this is a powerful BUY signal.
 
 # Output Requirement:
 Output MUST be in strict JSON format:
 {"ticker": string, "action": "BUY"|"IGNORE", "confidence": float, "reasoning": string}
 
-- "action": "BUY" only if confidence > 0.8. Otherwise "IGNORE".
-- "reasoning": Summarize the surprise and the risk assessment concisely.
+- "action": "BUY" if you see positive momentum.
+- "confidence": 0.0 - 1.0. (Threshold for BUY is > 0.7)
 `
 
 	// ユーザープロンプト（来期予想比較を強調）
@@ -62,10 +64,6 @@ Op Profit: %s JPY
 [Forecast (Next Year)]
 Sales: %s JPY
 Op Profit: %s JPY
-
-Instruction:
-- If "Next Year" profit is LOWER than "Current Year" result/forecast, you MUST conclude "IGNORE" (Negative Guidance).
-- If the "Operating Profit" is negative (Red), generally "IGNORE" unless "Next Year" shows a massive V-shaped recovery.
 `, 
 		data.LocalCode, data.DisclosedDate, 
 		data.OperatingProfit,

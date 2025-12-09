@@ -35,9 +35,9 @@ func main() {
 
 	// ヘッダーをスキップしてループ
 	for i, record := range records {
-		if i == 0 { continue } // Header
+		if i == 0 { continue }
 
-		dateStr := record[0] // 分析日 (例: 2025-06-25)
+		dateStr := record[0]
 		ticker := record[1]
 		action := record[2]
 
@@ -46,22 +46,26 @@ func main() {
 			continue
 		}
 
-		// 2. 翌日以降の株価を取得
-		// 分析日の「次の日」から「7日後」までのデータを取得し、最初に見つかった取引日を「翌営業日」とする
-		baseDate, _ := time.Parse("2006-01-02", dateStr)
+		baseDate, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			log.Printf("Date parse error: %v", err)
+			continue
+		}
+		
+		// 翌日から1週間分を検索範囲とする
 		fromDate := baseDate.AddDate(0, 0, 1).Format("2006-01-02")
 		toDate := baseDate.AddDate(0, 0, 7).Format("2006-01-02")
 
 		quotes, err := jq.GetDailyQuotes(ticker, fromDate, toDate)
 		if err != nil {
-			log.Printf("Error fetching quotes for %s: %v", ticker, err)
+			log.Printf("API Error fetching quotes for %s: %v", ticker, err)
 			continue
 		}
 
-		log.Printf("quotes: %v", quotes)
-
+		// === デバッグ用: データが空の場合はURLのパラメータが正しいか疑う ===
 		if len(quotes) == 0 {
-			log.Printf("[%s] No price data found after %s (Market holiday?)", ticker, dateStr)
+			log.Printf("⚠️ [%s] No quotes found between %s and %s.", ticker, fromDate, toDate)
+			log.Printf("   Debug Info: Analyzed Date=%s. Maybe Ticker code change or delisted?", dateStr)
 			continue
 		}
 
@@ -72,6 +76,7 @@ func main() {
 		// Entry: Open
 		// Target: Open * 1.01
 		entryPrice := targetDay.Open
+		// 目標は +1%
 		targetPrice := entryPrice * 1.01
 		maxPrice := targetDay.High
 
@@ -87,7 +92,7 @@ func main() {
 		// 最大上昇率
 		maxReturn := (maxPrice - entryPrice) / entryPrice * 100
 
-		fmt.Printf("[%s] Date:%s -> Trade:%s | Entry:%.0f -> High:%.0f (+%.2f%%) | Result: %s\n", 
+		fmt.Printf("[%s] Analyzed:%s -> Trade:%s | Entry:%.0f -> High:%.0f (+%.2f%%) | Result: %s\n", 
 			ticker, dateStr, targetDay.Date, entryPrice, maxPrice, maxReturn, resultStr)
 	}
 
@@ -99,6 +104,6 @@ func main() {
 		fmt.Printf("Wins:         %d\n", winCount)
 		fmt.Printf("Win Rate:     %.1f%%\n", winRate)
 	} else {
-		fmt.Println("No BUY trades found in csv.")
+		fmt.Println("No BUY trades found in csv to backtest.")
 	}
 }
