@@ -28,42 +28,48 @@ func Analyze(ctx context.Context, apiKey string, data jquants.FinancialStatement
 
 	modelName := "gemini-2.5-pro" 
 
-	// === バランス型（モメンタム重視）のプロンプト ===
+	// === ガイダンス重視（Guidance Growth）プロンプト ===
 	sysPrompt := `
-You are a Momentum Trader looking for "Earnings Surprises".
-Your goal is to identify stocks that will jump >1% tomorrow based on the disclosed financial data.
+You are a "Growth Hunter" AI trader.
+Your sole objective is to identify stocks where the **Future Guidance (Forecast)** has been revised upward, causing institutional buying pressure throughout the day.
 
-# Evaluation Criteria:
-1. **Positive Surprise**: Does the "Result" exceed the "Current Year Forecast"? (Even a +3% beat is positive).
-2. **Guidance Check**:
-   - If "Next Year Forecast" shows growth -> STRONG BUY signal.
-   - If "Next Year Forecast" is flat or slightly down, BUT the current beat is huge -> BUY signal (Market often reacts to the immediate surprise).
-   - If "Next Year Forecast" is a disastrous drop -> IGNORE.
-3. **Turnaround**: If the company moved from Loss (Red) to Profit (Black), this is a powerful BUY signal.
+# Critical Rule: "Don't Buy the Peak"
+- If a company reports good current results but the "Next Year Forecast" is weak or flat, the stock will likely "Gap Up and Sell Off". **IGNORE** these.
+- Only BUY if the **Future Forecast** implies accelerating growth.
+
+# Evaluation Criteria (Priority Order):
+1. **Guidance Growth**: Is "Next Year Forecast" significantly higher than "Current Result"? (e.g., +10% growth).
+2. **Profit Margin**: Is the Operating Profit Margin improving? (Profit/Sales ratio).
+3. **Surprise Factor**: Did they beat the current forecast by a wide margin?
 
 # Output Requirement:
 Output MUST be in strict JSON format:
 {"ticker": string, "action": "BUY"|"IGNORE", "confidence": float, "reasoning": string}
 
-- "action": "BUY" if you see positive momentum.
-- "confidence": 0.0 - 1.0. (Threshold for BUY is > 0.7)
+- "action": "BUY" only if you predict sustained buying after the open.
+- "confidence": > 0.8 for BUY.
 `
 
-	// ユーザープロンプト（来期予想比較を強調）
+	// ユーザープロンプト（計算補助を追加）
 	userPrompt := fmt.Sprintf(`
 Analyze Ticker: %s
 Disclosed Date: %s
 
-[Result (Current Period)]
-Operating Profit: %s JPY
+[Result (Recent)]
+Sales: - (Not provided in summary)
+Op Profit: %s JPY
 
-[Forecast (Current Year)]
+[Forecast (Current FY)]
 Sales: %s JPY
 Op Profit: %s JPY
 
-[Forecast (Next Year)]
+[Forecast (Next FY)]
 Sales: %s JPY
 Op Profit: %s JPY
+
+Instruction:
+Compare [Forecast (Next FY)] vs [Result (Recent)] or [Forecast (Current FY)].
+If the Next FY Op Profit is NOT higher than the Current FY Op Profit, output IGNORE immediately.
 `, 
 		data.LocalCode, data.DisclosedDate, 
 		data.OperatingProfit,

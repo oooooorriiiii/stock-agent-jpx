@@ -46,38 +46,43 @@ func main() {
 			continue
 		}
 
-		baseDate, err := time.Parse("2006-01-02", dateStr)
-		if err != nil {
-			log.Printf("Date parse error: %v", err)
-			continue
-		}
+		// 分析日（＝取引の前日）
+		analyzeDate, _ := time.Parse("2006-01-02", dateStr)
 		
-		// 翌日から1週間分を検索範囲とする
-		fromDate := baseDate.AddDate(0, 0, 1).Format("2006-01-02")
-		toDate := baseDate.AddDate(0, 0, 7).Format("2006-01-02")
+		// 分析日〜1週間後までのデータを取得（前日終値を知るため分析日も含める）
+		fromDate := analyzeDate.Format("2006-01-02")
+		toDate := analyzeDate.AddDate(0, 0, 7).Format("2006-01-02")
 
 		quotes, err := jq.GetDailyQuotes(ticker, fromDate, toDate)
 		if err != nil {
-			log.Printf("API Error fetching quotes for %s: %v", ticker, err)
+			log.Printf("API Error %s: %v", ticker, err)
+			continue
+		}
+		if len(quotes) < 2 {
+			log.Printf("⚠️ [%s] Not enough quotes (Need at least 2 days: PrevClose & TradeDay)", ticker)
 			continue
 		}
 
-		// === デバッグ用: データが空の場合はURLのパラメータが正しいか疑う ===
-		if len(quotes) == 0 {
-			log.Printf("⚠️ [%s] No quotes found between %s and %s.", ticker, fromDate, toDate)
-			log.Printf("   Debug Info: Analyzed Date=%s. Maybe Ticker code change or delisted?", dateStr)
-			continue
+		// quotes[0] が分析日(前日)、quotes[1] が取引日(当日) と想定
+		// ※日付が飛んでいる場合もあるので簡易的にチェック
+		prevDay := quotes[0]
+		targetDay := quotes[1]
+
+		// 取引日が分析日の「翌営業日」であることを確認（簡易チェック）
+		if targetDay.Date <= dateStr {
+			// 順番が逆、あるいはデータ欠損の場合の安全策
+			if len(quotes) > 2 { targetDay = quotes[2] }
 		}
 
-		// 翌営業日のデータ
-		targetDay := quotes[0]
-		
-		// 3. 勝敗判定 (Day Trade)
-		// Entry: Open
-		// Target: Open * 1.01
+		// Gap判定
+		prevClose := prevDay.Close
 		entryPrice := targetDay.Open
-		// 目標は +1%
-		targetPrice := entryPrice * 1.01
+		gapPercent := (entryPrice - prevClose) / prevClose * 100
+
+		// トレード判定
+		// 目標: +1.0% (デイトレ)
+		// 緩和策: +0.8%以上で微益撤退成功とみなすならここを 1.008 にする
+		targetPrice := entryPrice * 1.01 
 		maxPrice := targetDay.High
 
 		isWin := maxPrice >= targetPrice
@@ -92,8 +97,8 @@ func main() {
 		// 最大上昇率
 		maxReturn := (maxPrice - entryPrice) / entryPrice * 100
 
-		fmt.Printf("[%s] Analyzed:%s -> Trade:%s | Entry:%.0f -> High:%.0f (+%.2f%%) | Result: %s\n", 
-			ticker, dateStr, targetDay.Date, entryPrice, maxPrice, maxReturn, resultStr)
+		fmt.Printf("[%s] Gap: %+.2f%% | Entry:%.0f -> High:%.0f (Max: +%.2f%%) | Result: %s\n", 
+			ticker, gapPercent, entryPrice, maxPrice, maxReturn, resultStr)
 	}
 
 	// 結果サマリ
@@ -104,6 +109,6 @@ func main() {
 		fmt.Printf("Wins:         %d\n", winCount)
 		fmt.Printf("Win Rate:     %.1f%%\n", winRate)
 	} else {
-		fmt.Println("No BUY trades found in csv to backtest.")
+		fmt.Println("No BUY trades found.")
 	}
 }
