@@ -8,10 +8,8 @@ import (
 	"strings"
 
 	"google.golang.org/genai"
+	"github.com/oooooorriiiii/stock-agent-jpx/internal/jquants"
 )
-
-// jquantsパッケージの定義に合わせて読み替えてください
-import "github.com/oooooorriiiii/stock-agent-jpx/internal/jquants"
 
 type Evaluation struct {
 	Ticker     string  `json:"ticker"`
@@ -21,7 +19,6 @@ type Evaluation struct {
 }
 
 func Analyze(ctx context.Context, apiKey string, data jquants.FinancialStatement) (*Evaluation, error) {
-	// 1. GenAI クライアントの初期化
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey: apiKey,
 	})
@@ -29,22 +26,33 @@ func Analyze(ctx context.Context, apiKey string, data jquants.FinancialStatement
 		return nil, fmt.Errorf("genai client init error: %w", err)
 	}
 
-	// 2. モデルとコンフィグ設定
 	modelName := "gemini-2.5-pro" 
 
+	// === 修正: 厳格なシステムプロンプト ===
 	sysPrompt := `
-You are an algorithmic trading AI specializing in Japanese stocks.
-Evaluate the provided financial data for immediate stock price impact (next day).
-Output MUST be in strict JSON format corresponding to the schema:
+You are a skeptical, risk-averse hedge fund manager specializing in Japanese equities.
+Your goal is to identify stocks that will gap up >1% at the next market open due to a "Positive Surprise".
+
+# Analysis Process (Chain of Thought):
+1. **Identify the Surprise**: Compare the Result vs Forecast. Is the deviation >10%?
+2. **Check for Peak-out**: Compare "Next Year Forecast" vs "Current Result". If Next Year is lower, it is a SELL/IGNORE signal (Growth Slowdown).
+3. **Devil's Advocate**: List 3 reasons NOT to buy this stock (e.g., small profit magnitude, potential one-off gains).
+4. **Final Decision**: Only issue a "BUY" if the positive surprise is undeniable and outweighs all risks.
+
+# Output Requirement:
+Output MUST be in strict JSON format:
 {"ticker": string, "action": "BUY"|"IGNORE", "confidence": float, "reasoning": string}
+
+- "action": "BUY" only if confidence > 0.8. Otherwise "IGNORE".
+- "reasoning": Summarize the surprise and the risk assessment concisely.
 `
 
-	// 3. ユーザープロンプト作成
+	// ユーザープロンプト（来期予想比較を強調）
 	userPrompt := fmt.Sprintf(`
 Analyze Ticker: %s
 Disclosed Date: %s
 
-[Result]
+[Result (Current Period)]
 Operating Profit: %s JPY
 
 [Forecast (Current Year)]
@@ -55,9 +63,9 @@ Op Profit: %s JPY
 Sales: %s JPY
 Op Profit: %s JPY
 
-Instruction: 
-Focus on the "Next Year" forecast if "Current Year" is empty (indicates FY results).
-Compare Result vs Forecasts to judge the momentum.
+Instruction:
+- If "Next Year" profit is LOWER than "Current Year" result/forecast, you MUST conclude "IGNORE" (Negative Guidance).
+- If the "Operating Profit" is negative (Red), generally "IGNORE" unless "Next Year" shows a massive V-shaped recovery.
 `, 
 		data.LocalCode, data.DisclosedDate, 
 		data.OperatingProfit,
@@ -65,24 +73,12 @@ Compare Result vs Forecasts to judge the momentum.
 		data.NextYearForecastNetSales, data.NextYearForecastOperatingProfit,
 	)
 
-	// 4. 推論実行
-	// エラー修正: 構造体の型を厳密に合わせます
 	resp, err := client.Models.GenerateContent(ctx, modelName, 
-		// User Prompt (Contents)
-		// GenAI SDKの仕様に合わせて []*genai.Content または単一の Content を渡す必要がある場合がありますが、
-		// 多くのバージョンで可変長引数あるいは Content 構造体を受け取ります。
-		// ここでは genai.Text() が期待通り動かない可能性があるため、Partを明示的に作ります。
 		genai.Text(userPrompt), 
-		
-		// Config
 		&genai.GenerateContentConfig{
 			SystemInstruction: &genai.Content{
-				// Error Fix: Parts は []*genai.Part (ポインタのスライス)
-				Parts: []*genai.Part{
-					{Text: sysPrompt}, // Error Fix: 構造体リテラルでTextを指定
-				},
+				Parts: []*genai.Part{{Text: sysPrompt}},
 			},
-			// Error Fix: MIMETypeは大文字
 			ResponseMIMEType: "application/json", 
 		},
 	)
@@ -90,25 +86,25 @@ Compare Result vs Forecasts to judge the momentum.
 		return nil, fmt.Errorf("generate content error: %w", err)
 	}
 
-	// 5. 結果の取得
 	if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
 		return nil, fmt.Errorf("empty response from model")
 	}
 
 	var responseText string
-	// Error Fix: Partはインターフェースではなく構造体ポインタとして扱います
 	for _, part := range resp.Candidates[0].Content.Parts {
-		// part が nil でないことを確認し、Textフィールドを結合
 		if part != nil {
 			responseText += part.Text
 		}
 	}
 
-	// 6. JSONパース
+	// JSONパース処理
 	cleanJSON := strings.TrimSpace(responseText)
 	cleanJSON = strings.TrimPrefix(cleanJSON, "```json")
 	cleanJSON = strings.TrimPrefix(cleanJSON, "```")
 	cleanJSON = strings.TrimSuffix(cleanJSON, "```")
+	if idx := strings.Index(cleanJSON, "{"); idx != -1 {
+		cleanJSON = cleanJSON[idx:]
+	}
 
 	var eval Evaluation
 	if err := json.Unmarshal([]byte(cleanJSON), &eval); err != nil {

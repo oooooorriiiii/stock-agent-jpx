@@ -58,6 +58,8 @@ func main() {
 			continue
 		}
 
+		log.Printf("quotes: %v", quotes)
+
 		if len(quotes) == 0 {
 			log.Printf("[%s] No price data found after %s (Market holiday?)", ticker, dateStr)
 			continue

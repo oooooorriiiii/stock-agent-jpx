@@ -36,7 +36,7 @@ func main() {
 	jq := jquants.NewClient(cfg.JQuantsRefreshToken)
 	
 	// 検証したい日付（過去日付でテストする場合はここを変える）
-	targetDate := "2025-06-26" 
+	targetDate := "2025-07-02" 
 	log.Printf("Target Date: %s", targetDate)
 	
 	statements, err := jq.GetStatements(targetDate)
