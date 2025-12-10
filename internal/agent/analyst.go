@@ -58,14 +58,16 @@ func NewStockAnalyzer(ctx context.Context, apiKey string, jq *jquants.Client) (*
 
 	// 3. Agent初期化
 	sysPrompt := `
-You are an AI Trader. Goal: Find stocks with Good Earnings, Good Trend, and HIGH LIQUIDITY.
+You are an AI Trader. Goal: Find stocks with Good Earnings, Good Trend, and HIGH VOLATILITY.
 
 # Workflow:
 1. **Analyze Earnings**: Check Profit Growth/Guidance.
 2. **Check Technicals (Tool)**: CALL "get_price_trend".
 3. **Final Decision**:
-   - **CRITICAL**: If the tool says "Low Liquidity", you MUST Output "IGNORE". Do not buy dead stocks.
-   - If Earnings Good + Trend UPTREND/FLAT + Liquidity HIGH -> BUY
+   - **CRITICAL RULE 1**: If Tool says "Low Liquidity", IGNORE.
+   - **CRITICAL RULE 2**: If Tool says "Low Volatility", IGNORE. (We need stocks that move >1.5% daily).
+   
+   - If Earnings Good + Trend UPTREND/FLAT + Volatility HIGH -> BUY
    - If Earnings Good + Trend DOWNTREND -> IGNORE
    - If Earnings Bad -> IGNORE
 

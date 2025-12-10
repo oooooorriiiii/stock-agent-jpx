@@ -37,14 +37,14 @@ func (t *PriceTrendTool) Execute(ctx tool.Context, args PriceTrendArgs) (PriceTr
 	return PriceTrendResult{Analysis: resultStr}, nil
 }
 
-// ユーザー定義のロジック (元のGetPriceTrendをメソッド化)
+// ユーザー定義のロジック
 func (t *PriceTrendTool) getPriceTrendLogic(ticker string, baseDateStr string) (string, error) {
 	baseDate, err := time.Parse("2006-01-02", baseDateStr)
 	if err != nil {
 		return "", fmt.Errorf("invalid date format")
 	}
 
-	fromDate := baseDate.AddDate(0, 0, -14).Format("2006-01-02")
+	fromDate := baseDate.AddDate(0, 0, -20).Format("2006-01-02") // 期間を少し長めに確保
 	toDate := baseDateStr
 
 	quotes, err := t.Client.GetDailyQuotes(ticker, fromDate, toDate)
@@ -56,27 +56,50 @@ func (t *PriceTrendTool) getPriceTrendLogic(ticker string, baseDateStr string) (
 	}
 
 	latest := quotes[len(quotes)-1]
-	mid := quotes[len(quotes)/2]
 	start := quotes[0]
 
-	// === 売買代金の計算 ===
-	// 売買代金 = 終値 * 出来高
-	// 直近5日間の平均売買代金を計算
+	// === 1. 売買代金チェック (流動性) ===
 	var totalValue float64
+	var totalVolatility float64
 	count := 0
-	for i := len(quotes) - 1; i >= 0 && count < 5; i-- {
-		totalValue += quotes[i].Close * quotes[i].Volume
+	
+	// 直近5日間の平均を計算
+	for i := len(quotes) - 1; i >= len(quotes)-5 && i >= 0; i-- {
+		q := quotes[i]
+		
+		// 売買代金
+		totalValue += q.Close * q.Volume
+		
+		// 日中変動率 (High - Low) / Open
+		// Openが0の場合はCloseを使うなどの安全策
+		basePrice := q.Open
+		if basePrice == 0 { basePrice = q.Close }
+		if basePrice > 0 {
+			dayRange := (q.High - q.Low) / basePrice * 100
+			totalVolatility += dayRange
+		}
+		
 		count++
 	}
+	
 	avgValue := totalValue / float64(count)
+	avgVolatility := totalVolatility / float64(count) // 平均変動率 (%)
 
-	// 閾値: 3億円 (300,000,000 JPY)
-	// これ以下は「過疎銘柄」として警告
+	// === 判定ロジック ===
 	liquidityStatus := "HIGH"
-	liquidityWarning := ""
+	warningMsg := ""
+
+	// 条件1: 売買代金 3億円未満 -> NG
 	if avgValue < 300_000_000 {
 		liquidityStatus = "LOW"
-		liquidityWarning = fmt.Sprintf("\nCRITICAL WARNING: Low Liquidity (Avg Value: %.0f JPY). Stock may not move. IGNORE recommended.", avgValue)
+		warningMsg += fmt.Sprintf("\n[WARNING] Low Liquidity (Avg Value: %.0f JPY). Hard to trade.", avgValue)
+	}
+
+	// 条件2: ボラティリティ 1.5%未満 -> NG (1%抜くのが難しい)
+	volatilityStatus := "HIGH"
+	if avgVolatility < 1.5 {
+		volatilityStatus = "LOW"
+		warningMsg += fmt.Sprintf("\n[WARNING] Low Volatility (Avg Range: %.2f%%). Stock moves too slow to hit +1%% target.", avgVolatility)
 	}
 
 	trend := "FLAT"
@@ -87,7 +110,7 @@ func (t *PriceTrendTool) getPriceTrendLogic(ticker string, baseDateStr string) (
 	}
 
 	return fmt.Sprintf(
-		"Trend: %s\nLiquidity: %s%s\nLatest Close: %.0f\n5-day ago: %.0f",
-		trend, liquidityStatus, liquidityWarning, latest.Close, mid.Close,
+		"Trend: %s\nLiquidity: %s\nVolatility: %.2f%% (%s)%s\nLatest Close: %.0f",
+		trend, liquidityStatus, avgVolatility, volatilityStatus, warningMsg, latest.Close,
 	), nil
 }
