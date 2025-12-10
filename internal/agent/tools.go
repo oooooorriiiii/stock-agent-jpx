@@ -44,22 +44,40 @@ func (t *PriceTrendTool) getPriceTrendLogic(ticker string, baseDateStr string) (
 		return "", fmt.Errorf("invalid date format")
 	}
 
-	// 過去14日間のデータを取得（休場日考慮で少し長めに）
 	fromDate := baseDate.AddDate(0, 0, -14).Format("2006-01-02")
 	toDate := baseDateStr
 
-	// 構造体に保持しているClientを使用
 	quotes, err := t.Client.GetDailyQuotes(ticker, fromDate, toDate)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch quotes: %v", err)
 	}
 	if len(quotes) < 5 {
-		return "Insufficient price data to determine trend.", nil
+		return "Insufficient data.", nil
 	}
 
 	latest := quotes[len(quotes)-1]
 	mid := quotes[len(quotes)/2]
 	start := quotes[0]
+
+	// === 売買代金の計算 ===
+	// 売買代金 = 終値 * 出来高
+	// 直近5日間の平均売買代金を計算
+	var totalValue float64
+	count := 0
+	for i := len(quotes) - 1; i >= 0 && count < 5; i-- {
+		totalValue += quotes[i].Close * quotes[i].Volume
+		count++
+	}
+	avgValue := totalValue / float64(count)
+
+	// 閾値: 3億円 (300,000,000 JPY)
+	// これ以下は「過疎銘柄」として警告
+	liquidityStatus := "HIGH"
+	liquidityWarning := ""
+	if avgValue < 300_000_000 {
+		liquidityStatus = "LOW"
+		liquidityWarning = fmt.Sprintf("\nCRITICAL WARNING: Low Liquidity (Avg Value: %.0f JPY). Stock may not move. IGNORE recommended.", avgValue)
+	}
 
 	trend := "FLAT"
 	if latest.Close > start.Close*1.05 {
@@ -69,7 +87,7 @@ func (t *PriceTrendTool) getPriceTrendLogic(ticker string, baseDateStr string) (
 	}
 
 	return fmt.Sprintf(
-		"Trend: %s\nLatest Close: %.0f (%s)\n5-day ago: %.0f\n10-day ago: %.0f\nWarning: Ensure the stock is NOT in a sharp downtrend before buying.",
-		trend, latest.Close, latest.Date, mid.Close, start.Close,
+		"Trend: %s\nLiquidity: %s%s\nLatest Close: %.0f\n5-day ago: %.0f",
+		trend, liquidityStatus, liquidityWarning, latest.Close, mid.Close,
 	), nil
 }

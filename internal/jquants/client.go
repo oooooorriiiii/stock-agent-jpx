@@ -109,6 +109,7 @@ type DailyQuote struct {
 	High  float64 `json:"High"`
 	Low   float64 `json:"Low"`
 	Close float64 `json:"Close"`
+	Volume float64 `json:"Volume"`
 }
 
 // 指定した銘柄の株価を取得（日付範囲指定）

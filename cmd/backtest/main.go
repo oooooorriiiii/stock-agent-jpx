@@ -15,7 +15,6 @@ func main() {
 	cfg := config.Load()
 	jq := jquants.NewClient(cfg.JQuantsRefreshToken)
 
-	// 1. CSVの読み込み
 	file, err := os.Open("results.csv")
 	if err != nil {
 		log.Fatalf("Failed to open results.csv: %v", err)
@@ -28,28 +27,34 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Println("--- Starting Backtest ---")
+	// 設定: ギャップ上限（これ以上高く寄り付いたら買わない）
+	const MaxGapThreshold = 2.5 // +2.5%
+
+	log.Printf("--- Starting Backtest (Filter: Gap < %.1f%%) ---", MaxGapThreshold)
 	
 	winCount := 0
 	tradeCount := 0
+	skippedGapCount := 0
+	
+	// 重複チェック用マップ (Key: "Date-Ticker")
+	processed := make(map[string]bool)
 
-	// ヘッダーをスキップしてループ
 	for i, record := range records {
 		if i == 0 { continue }
-
 		dateStr := record[0]
 		ticker := record[1]
 		action := record[2]
 
-		// BUYのみ検証
-		if action != "BUY" {
+		if action != "BUY" { continue }
+
+		// 重複排除
+		key := fmt.Sprintf("%s-%s", dateStr, ticker)
+		if processed[key] {
 			continue
 		}
+		processed[key] = true
 
-		// 分析日（＝取引の前日）
 		analyzeDate, _ := time.Parse("2006-01-02", dateStr)
-		
-		// 分析日〜1週間後までのデータを取得（前日終値を知るため分析日も含める）
 		fromDate := analyzeDate.Format("2006-01-02")
 		toDate := analyzeDate.AddDate(0, 0, 7).Format("2006-01-02")
 
@@ -59,32 +64,44 @@ func main() {
 			continue
 		}
 		if len(quotes) < 2 {
-			log.Printf("⚠️ [%s] Not enough quotes (Need at least 2 days: PrevClose & TradeDay)", ticker)
 			continue
 		}
 
-		// quotes[0] が分析日(前日)、quotes[1] が取引日(当日) と想定
-		// ※日付が飛んでいる場合もあるので簡易的にチェック
-		prevDay := quotes[0]
-		targetDay := quotes[1]
-
-		// 取引日が分析日の「翌営業日」であることを確認（簡易チェック）
-		if targetDay.Date <= dateStr {
-			// 順番が逆、あるいはデータ欠損の場合の安全策
-			if len(quotes) > 2 { targetDay = quotes[2] }
+		// データ検索: PrevClose(分析日) と EntryDay(翌営業日) を特定
+		var prevDay, targetDay jquants.DailyQuote
+		found := false
+		
+		// quote[0]が分析日(dateStr)と一致するか確認
+		for j := 0; j < len(quotes)-1; j++ {
+			if quotes[j].Date == dateStr {
+				prevDay = quotes[j]
+				targetDay = quotes[j+1]
+				found = true
+				break
+			}
+		}
+		
+		// 日付不整合やデータ欠損(0円)のチェック
+		if !found || prevDay.Close <= 0 || targetDay.Open <= 0 {
+			// log.Printf("⚠️ [%s] Invalid data quality. Skipping.", ticker)
+			continue
 		}
 
-		// Gap判定
+		// Gap計算
 		prevClose := prevDay.Close
 		entryPrice := targetDay.Open
 		gapPercent := (entryPrice - prevClose) / prevClose * 100
 
-		// トレード判定
-		// 目標: +1.0% (デイトレ)
-		// 緩和策: +0.8%以上で微益撤退成功とみなすならここを 1.008 にする
+		// === フィルタリング: 高すぎる寄り付きは避ける ===
+		if gapPercent > MaxGapThreshold {
+			fmt.Printf("⏭️  [%s] Skipped High Gap: +%.2f%%\n", ticker, gapPercent)
+			skippedGapCount++
+			continue
+		}
+
+		// トレード判定 (TP: +1%)
 		targetPrice := entryPrice * 1.01 
 		maxPrice := targetDay.High
-
 		isWin := maxPrice >= targetPrice
 		
 		resultStr := "LOSE ❌"
@@ -94,21 +111,20 @@ func main() {
 		}
 		tradeCount++
 
-		// 最大上昇率
 		maxReturn := (maxPrice - entryPrice) / entryPrice * 100
 
-		fmt.Printf("[%s] Gap: %+.2f%% | Entry:%.0f -> High:%.0f (Max: +%.2f%%) | Result: %s\n", 
+		fmt.Printf("[%s] Gap:%+6.2f%% | Entry:%5.0f -> High:%5.0f (Max:+%.2f%%) | Result: %s\n", 
 			ticker, gapPercent, entryPrice, maxPrice, maxReturn, resultStr)
 	}
 
-	// 結果サマリ
 	if tradeCount > 0 {
 		winRate := float64(winCount) / float64(tradeCount) * 100
 		fmt.Printf("\n=== Backtest Summary ===\n")
-		fmt.Printf("Total Trades: %d\n", tradeCount)
+		fmt.Printf("Valid Trades: %d\n", tradeCount)
 		fmt.Printf("Wins:         %d\n", winCount)
 		fmt.Printf("Win Rate:     %.1f%%\n", winRate)
+		fmt.Printf("Skipped Gaps: %d\n", skippedGapCount)
 	} else {
-		fmt.Println("No BUY trades found.")
+		fmt.Println("No valid trades found.")
 	}
 }

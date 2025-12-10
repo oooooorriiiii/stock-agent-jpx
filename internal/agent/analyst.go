@@ -58,14 +58,17 @@ func NewStockAnalyzer(ctx context.Context, apiKey string, jq *jquants.Client) (*
 
 	// 3. Agent初期化
 	sysPrompt := `
-You are an AI Trader. Goal: Find stocks with Good Earnings AND Good Technical Trend.
-Workflow:
-1. Analyze Earnings: Check Profit Growth/Guidance.
-2. Check Trend (Tool): IF earnings good, CALL "get_price_trend".
-3. Decision:
-   - Earnings Good + Trend UPTREND/FLAT -> BUY
-   - Earnings Good + Trend DOWNTREND -> IGNORE
-   - Earnings Bad -> IGNORE
+You are an AI Trader. Goal: Find stocks with Good Earnings, Good Trend, and HIGH LIQUIDITY.
+
+# Workflow:
+1. **Analyze Earnings**: Check Profit Growth/Guidance.
+2. **Check Technicals (Tool)**: CALL "get_price_trend".
+3. **Final Decision**:
+   - **CRITICAL**: If the tool says "Low Liquidity", you MUST Output "IGNORE". Do not buy dead stocks.
+   - If Earnings Good + Trend UPTREND/FLAT + Liquidity HIGH -> BUY
+   - If Earnings Good + Trend DOWNTREND -> IGNORE
+   - If Earnings Bad -> IGNORE
+
 Output JSON: {"ticker": string, "action": "BUY"|"IGNORE", "confidence": float, "reasoning": string}
 `
 	traderAgent, err := llmagent.New(llmagent.Config{
@@ -127,19 +130,38 @@ Next Year Op Profit: %s
 		agent.RunConfig{StreamingMode: agent.StreamingModeNone},
 	)
 
-	// 結果の取得とパース
+// 結果の取得とパース
 	var lastText string
 	for event, err := range events {
 		if err != nil {
 			return nil, fmt.Errorf("agent run error: %w", err)
 		}
-		if len(event.Content.Parts) > 0 {
-			lastText = event.Content.Parts[0].Text
+
+		// event.Content が nil でないことを確認してからアクセスする
+		if event.Content != nil && len(event.Content.Parts) > 0 {
+			if txt := event.Content.Parts[0].Text; txt != "" {
+				lastText = txt
+			}
 		}
 	}
 
 	// JSON部分の抽出とパース
-	return parseJSONResponse(lastText)
+	if lastText == "" {
+		return nil, fmt.Errorf("agent returned no text response")
+	}
+
+	// === 修正箇所: 変数宣言だけでなく、エラーチェックと return を行う ===
+	eval, err := parseJSONResponse(lastText)
+	if err != nil {
+		// JSONパース失敗時もエラーとして返す
+		return nil, fmt.Errorf("json parse error: %w (raw: %s)", err, lastText)
+	}
+
+	// 銘柄コードなどのメタデータを付与
+	eval.Ticker = data.LocalCode
+	eval.PromptID = "v5_liquidity_filter" // バージョン管理用
+
+	return eval, nil
 }
 
 func parseJSONResponse(text string) (*Evaluation, error) {
