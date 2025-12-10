@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/oooooorriiiii/stock-agent-jpx/internal/agent"
@@ -15,89 +16,107 @@ import (
 
 func main() {
 	cfg := config.Load()
+	
+	// 検証期間
+	startDateStr := "2025-06-25"
+	endDateStr := "2025-06-30"
 
-	// === 期間指定の設定 ===
-	startDateStr := "2025-06-20"
-	endDateStr := "2025-06-30" 
-	// ===================
-
-	// CSV準備（PromptID列を追加）
+	// CSV準備（CompanyNameを追加）
 	file, _ := os.OpenFile("results.csv", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	defer file.Close()
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
-
+	
 	stat, _ := file.Stat()
 	if stat.Size() == 0 {
-		writer.Write([]string{"Date", "Ticker", "Action", "Confidence", "Reasoning", "PromptID"})
+		// ヘッダーに CompanyName を追加
+		writer.Write([]string{
+			"Date", "Ticker", "CompanyName", "Action", "Confidence", "Reasoning", 
+			"Financials", "Technicals", "PromptID",
+		})
 	}
 
+	jq := jquants.NewClient(cfg.JQuantsRefreshToken)
 	ctx := context.Background()
 
-	// 1. J-Quants Clientの初期化
-	jq := jquants.NewClient(cfg.JQuantsRefreshToken)
+	log.Println("Loading listed company info...")
+	nameMap, err := jq.GetListedInfoMap()
+	if err != nil {
+		log.Printf("Warning: Failed to load company names: %v", err)
+		nameMap = make(map[string]string)
+	}
+	log.Printf("Loaded %d companies.", len(nameMap))
 
-	// 2. Analyzer (Agent) の初期化 【ここを追加】
-	// ループの外で一度だけ作成することで、モデル定義やTool設定のオーバーヘッドを削減します
 	analyzer, err := agent.NewStockAnalyzer(ctx, cfg.GoogleAPIKey, jq)
 	if err != nil {
-		log.Fatalf("Failed to initialize StockAnalyzer: %v", err)
+		log.Fatalf("Failed to init analyzer: %v", err)
 	}
 
-	// 日付ループ
 	start, _ := time.Parse("2006-01-02", startDateStr)
 	end, _ := time.Parse("2006-01-02", endDateStr)
 
 	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
 		targetDate := d.Format("2006-01-02")
-		log.Printf("--- Processing Date: %s ---", targetDate)
+		log.Printf("\n========== Processing Date: %s ==========", targetDate)
 
 		statements, err := jq.GetStatements(targetDate)
 		if err != nil {
-			log.Printf("Failed to fetch data for %s: %v", targetDate, err)
+			log.Printf("Failed to fetch data: %v", err)
 			continue
 		}
-
 		if len(statements) == 0 {
-			log.Printf("No statements found for %s (Holiday or no disclosure). Skipping.", targetDate)
+			log.Printf("No statements found. Skipping.")
 			continue
 		}
 
-		log.Printf("Found %d statements.", len(statements))
+		log.Printf("Found %d statements. Starting analysis...\n", len(statements))
 
-		for _, s := range statements {
-			if s.OperatingProfit == "" {
-				continue
-			}
+		for i, s := range statements {
+			if s.OperatingProfit == "" { continue }
 
-			// レートリミット (Tier 1)
+			companyName := nameMap[s.LocalCode]
+			if companyName == "" { companyName = "Unknown" }
+
+			fmt.Printf("--------------------------------------------------\n")
+			fmt.Printf("🔍 [%d/%d] Analyzing %s (%s)\n", i+1, len(statements), s.LocalCode, companyName)
+			
 			time.Sleep(5 * time.Second)
 
-			// 3. Analyzeの実行 【ここを変更】
-			// インスタンスメソッドとして呼び出します。jqなどは初期化時に渡済みなので引数が減ります。
 			eval, err := analyzer.Analyze(ctx, s)
 			if err != nil {
-				log.Printf("Error [%s]: %v", s.LocalCode, err)
+				log.Printf("❌ Error: %v", err)
 				continue
 			}
 
-			if eval.Action == "BUY" {
-				log.Printf("🚀 [%s] BUY (Conf: %.2f): %s", eval.Ticker, eval.Confidence, eval.Reasoning)
+			fmt.Printf("   📊 Financials: %s\n", eval.FinancialSummary)
+			if eval.TechnicalSummary != "" {
+				fmt.Printf("   📈 Technicals:\n      %s\n", eval.TechnicalSummary)
 			} else {
-				log.Printf("💤 [%s] IGNORE: %s", eval.Ticker, eval.Reasoning)
+				fmt.Printf("   📈 Technicals: (Not checked)\n")
 			}
+			
+			icon := "💤"
+			if eval.Action == "BUY" { icon = "🚀" }
+			fmt.Printf("   🤖 Decision: %s %s (Conf: %.2f)\n", icon, eval.Action, eval.Confidence)
+			fmt.Printf("      Reason: %s\n", eval.Reasoning)
 
-			// CSV書き込み
+			// === CSV書き込みデータの整形 ===
+			// 改行を " | " に置換して1行にする
+			cleanTech := strings.ReplaceAll(eval.TechnicalSummary, "\n", " | ")
+
 			writer.Write([]string{
 				targetDate,
 				eval.Ticker,
+				companyName, // 追加
 				eval.Action,
 				fmt.Sprintf("%.2f", eval.Confidence),
 				eval.Reasoning,
-				eval.PromptID, // SessionIDなどが入る想定
+				eval.FinancialSummary,
+				cleanTech, // 整形済みデータ
+				eval.PromptID,
 			})
 			writer.Flush()
 		}
 	}
-	log.Println("Batch Analysis Completed.")
+	log.Println("\n========== Batch Analysis Completed ==========")
 }

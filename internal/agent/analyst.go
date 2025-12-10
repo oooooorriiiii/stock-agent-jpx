@@ -30,7 +30,10 @@ type Evaluation struct {
 	Action     string  `json:"action"`
 	Confidence float64 `json:"confidence"`
 	Reasoning  string  `json:"reasoning"`
+
 	PromptID   string  `json:"-"` // JSONからは読み込まないが、CSV出力用に構造体に持たせる
+	FinancialSummary string `json:"-"` // 入力した財務データの要約
+	TechnicalSummary string `json:"-"` // ツールが返したテクニカル分析結果
 }
 
 // 初期化関数 (ここでModelやToolのセットアップを1回だけ行う)
@@ -116,12 +119,17 @@ func (s *StockAnalyzer) Analyze(ctx context.Context, data jquants.FinancialState
 	// 関数の最後でセッションを削除（履歴クリアのため）
 	defer s.sessionService.Delete(ctx, &session.DeleteRequest{SessionID: sess.Session.ID()})
 
+	// 2. プロンプト作成 & 財務サマリの記録
+	finSummary := fmt.Sprintf(
+		"OpProfit: %s (Fcst: %s) | NextYear: %s",
+		data.OperatingProfit, data.ForecastOperatingProfit, data.NextYearForecastOperatingProfit,
+	)
+
 	// プロンプト作成
 	userPrompt := fmt.Sprintf(`
 Analyze Ticker: %s (Date: %s)
-Op Profit: %s (Forecast: %s)
-Next Year Op Profit: %s
-`, data.LocalCode, data.DisclosedDate, data.OperatingProfit, data.ForecastOperatingProfit, data.NextYearForecastOperatingProfit)
+%s
+`, data.LocalCode, data.DisclosedDate, finSummary)
 
 	// 実行
 	events := s.runner.Run(
@@ -132,17 +140,31 @@ Next Year Op Profit: %s
 		agent.RunConfig{StreamingMode: agent.StreamingModeNone},
 	)
 
-// 結果の取得とパース
+	// 4. 結果の取得とパース（ツール出力のキャプチャ機能を追加）
 	var lastText string
+	var toolOutput string // ツールの実行結果を保持	
+
 	for event, err := range events {
 		if err != nil {
 			return nil, fmt.Errorf("agent run error: %w", err)
 		}
 
-		// event.Content が nil でないことを確認してからアクセスする
-		if event.Content != nil && len(event.Content.Parts) > 0 {
-			if txt := event.Content.Parts[0].Text; txt != "" {
-				lastText = txt
+		if event.Content != nil {
+			for _, part := range event.Content.Parts {
+				// テキスト（モデルの回答）
+				if part.Text != "" {
+					lastText = part.Text
+				}
+				
+				if part.FunctionResponse != nil {
+					// 構造体のフィールドに直接アクセス
+					if val, ok := part.FunctionResponse.Response["analysis"]; ok {
+						toolOutput = fmt.Sprintf("%v", val)
+					} else {
+						// resultキーがない場合は全体を保存
+						toolOutput = fmt.Sprintf("%v", part.FunctionResponse.Response)
+					}
+				}
 			}
 		}
 	}
@@ -152,16 +174,18 @@ Next Year Op Profit: %s
 		return nil, fmt.Errorf("agent returned no text response")
 	}
 
-	// === 修正箇所: 変数宣言だけでなく、エラーチェックと return を行う ===
+	// 5. JSONパース	
 	eval, err := parseJSONResponse(lastText)
 	if err != nil {
 		// JSONパース失敗時もエラーとして返す
 		return nil, fmt.Errorf("json parse error: %w (raw: %s)", err, lastText)
 	}
 
-	// 銘柄コードなどのメタデータを付与
+	// 付帯情報の格納
 	eval.Ticker = data.LocalCode
-	eval.PromptID = "v5_liquidity_filter" // バージョン管理用
+	eval.PromptID = "v5_liquidity_filter"
+	eval.FinancialSummary = finSummary
+	eval.TechnicalSummary = toolOutput // キャプチャしたツール結果を格納
 
 	return eval, nil
 }

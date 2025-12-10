@@ -112,6 +112,50 @@ type DailyQuote struct {
 	Volume float64 `json:"Volume"`
 }
 
+type ListedInfo struct {
+	Code        string `json:"Code"`
+	CompanyName string `json:"CompanyName"`
+	Sector17CodeName string `json:"Sector17CodeName"`
+}
+
+// 上場銘柄一覧を取得し、マップ (Code -> Name) を返す
+func (c *Client) GetListedInfoMap() (map[string]string, error) {
+	if c.IDToken == "" {
+		if err := c.Authenticate(); err != nil {
+			return nil, err
+		}
+	}
+
+	url := fmt.Sprintf("%s/listed/info", BaseURL)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer "+c.IDToken)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("api error: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Info []ListedInfo `json:"info"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	// 使いやすいように Map に変換
+	nameMap := make(map[string]string)
+	for _, info := range result.Info {
+		nameMap[info.Code] = info.CompanyName
+	}
+	return nameMap, nil
+}
+
 // 指定した銘柄の株価を取得（日付範囲指定）
 // API仕様: /prices/daily_quotes?code=xxxx&from=yyyy-mm-dd&to=yyyy-mm-dd
 func (c *Client) GetDailyQuotes(code string, fromDate string, toDate string) ([]DailyQuote, error) {

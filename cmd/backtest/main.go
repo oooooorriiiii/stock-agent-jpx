@@ -41,9 +41,14 @@ func main() {
 
 	for i, record := range records {
 		if i == 0 { continue }
+
+		// 0:Date, 1:Ticker, 2:CompanyName, 3:Action, ...
+		if len(record) < 4 { continue } // 安全策
+		
 		dateStr := record[0]
 		ticker := record[1]
-		action := record[2]
+		// companyName := record[2] // 必要なら表示に使用
+		action := record[3]
 
 		if action != "BUY" { continue }
 
@@ -81,11 +86,7 @@ func main() {
 			}
 		}
 		
-		// 日付不整合やデータ欠損(0円)のチェック
-		if !found || prevDay.Close <= 0 || targetDay.Open <= 0 {
-			// log.Printf("⚠️ [%s] Invalid data quality. Skipping.", ticker)
-			continue
-		}
+		if !found || prevDay.Close <= 0 || targetDay.Open <= 0 { continue }
 
 		// Gap計算
 		prevClose := prevDay.Close
