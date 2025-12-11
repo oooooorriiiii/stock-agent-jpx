@@ -14,7 +14,7 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
-	
+
 	"github.com/oooooorriiiii/stock-agent-jpx/internal/jquants"
 )
 
@@ -31,7 +31,7 @@ type Evaluation struct {
 	Confidence float64 `json:"confidence"`
 	Reasoning  string  `json:"reasoning"`
 
-	PromptID   string  `json:"-"` // JSONからは読み込まないが、CSV出力用に構造体に持たせる
+	PromptID         string `json:"-"` // JSONからは読み込まないが、CSV出力用に構造体に持たせる
 	FinancialSummary string `json:"-"` // 入力した財務データの要約
 	TechnicalSummary string `json:"-"` // ツールが返したテクニカル分析結果
 }
@@ -47,7 +47,7 @@ func NewStockAnalyzer(ctx context.Context, apiKey string, jq *jquants.Client) (*
 
 	// 2. Tool初期化 (jqクライアントを注入)
 	trendToolInstance := &PriceTrendTool{Client: jq}
-	
+
 	trendTool, err := functiontool.New(
 		functiontool.Config{
 			Name:        "get_price_trend",
@@ -61,20 +61,25 @@ func NewStockAnalyzer(ctx context.Context, apiKey string, jq *jquants.Client) (*
 
 	// 3. Agent初期化
 	sysPrompt := `
-You are an AI Trader. Goal: Find stocks with Good Earnings, Good Trend, and HIGH VOLATILITY.
+You are an expert Alpha Seeker AI.
+Your goal is to score stocks based on "Earnings Power" vs "Market Quality".
 
-# Workflow:
-1. **Analyze Earnings**: Check Profit Growth/Guidance.
-2. **Check Technicals (Tool)**: CALL "get_price_trend".
-3. **Final Decision**:
-   - **CRITICAL RULE 1**: If Tool says "Low Liquidity", IGNORE.
-   - **CRITICAL RULE 2**: If Tool says "Low Volatility", IGNORE. (We need stocks that move >1.5% daily).
-   
-   - If Earnings Good + Trend UPTREND/FLAT + Volatility HIGH -> BUY
-   - If Earnings Good + Trend DOWNTREND -> IGNORE
-   - If Earnings Bad -> IGNORE
+# Input Data
+1. **Financials**: Profit growth, Forecast revisions.
+2. **Technicals (Tool)**: Trend, Liquidity (Trading Value), Volatility.
 
-Output JSON: {"ticker": string, "action": "BUY"|"IGNORE", "confidence": float, "reasoning": string}
+# Evaluation Logic (Trade-off Analysis):
+- **Earnings**: Strong guidance updates are the strongest signal.
+- **Liquidity**: Higher is better. If < 100M JPY, the earnings surprise must be massive to justify the risk.
+- **Volatility**: Higher is better for day trading. If < 1.0%, it's hard to make profit, so only BUY if you expect a huge gap-up that sticks.
+
+# Decision Rule:
+- Do NOT blindly reject stocks based on a single threshold. Look at the full picture.
+- If Earnings are "Mediocre" AND Volatility is "Low" -> IGNORE.
+- If Earnings are "Superb" -> You can tolerate slightly lower liquidity or volatility.
+
+# Output Requirement:
+Output strict JSON: {"ticker": string, "action": "BUY"|"IGNORE", "confidence": float, "reasoning": string}
 `
 	traderAgent, err := llmagent.New(llmagent.Config{
 		Name:        "ai_trader",
@@ -142,7 +147,7 @@ Analyze Ticker: %s (Date: %s)
 
 	// 4. 結果の取得とパース（ツール出力のキャプチャ機能を追加）
 	var lastText string
-	var toolOutput string // ツールの実行結果を保持	
+	var toolOutput string // ツールの実行結果を保持
 
 	for event, err := range events {
 		if err != nil {
@@ -155,7 +160,7 @@ Analyze Ticker: %s (Date: %s)
 				if part.Text != "" {
 					lastText = part.Text
 				}
-				
+
 				if part.FunctionResponse != nil {
 					// 構造体のフィールドに直接アクセス
 					if val, ok := part.FunctionResponse.Response["analysis"]; ok {
@@ -174,7 +179,7 @@ Analyze Ticker: %s (Date: %s)
 		return nil, fmt.Errorf("agent returned no text response")
 	}
 
-	// 5. JSONパース	
+	// 5. JSONパース
 	eval, err := parseJSONResponse(lastText)
 	if err != nil {
 		// JSONパース失敗時もエラーとして返す
