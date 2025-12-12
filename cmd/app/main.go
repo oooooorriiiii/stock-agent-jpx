@@ -14,24 +14,26 @@ import (
 	"github.com/oooooorriiiii/stock-agent-jpx/internal/jquants"
 )
 
+const MaxRetries = 5
+
 func main() {
 	cfg := config.Load()
-	
+
 	// 検証期間
-	startDateStr := "2025-06-25"
-	endDateStr := "2025-06-30"
+	startDateStr := "2025-07-01"
+	endDateStr := "2025-07-22"
 
 	// CSV準備（CompanyNameを追加）
 	file, _ := os.OpenFile("results.csv", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	defer file.Close()
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
-	
+
 	stat, _ := file.Stat()
 	if stat.Size() == 0 {
 		// ヘッダーに CompanyName を追加
 		writer.Write([]string{
-			"Date", "Ticker", "CompanyName", "Action", "Confidence", "Reasoning", 
+			"Date", "Ticker", "CompanyName", "Action", "Confidence", "Reasoning",
 			"Financials", "Technicals", "PromptID",
 		})
 	}
@@ -72,19 +74,45 @@ func main() {
 		log.Printf("Found %d statements. Starting analysis...\n", len(statements))
 
 		for i, s := range statements {
-			if s.OperatingProfit == "" { continue }
+			if s.OperatingProfit == "" {
+				continue
+			}
 
 			companyName := nameMap[s.LocalCode]
-			if companyName == "" { companyName = "Unknown" }
+			if companyName == "" {
+				companyName = "Unknown"
+			}
 
 			fmt.Printf("--------------------------------------------------\n")
 			fmt.Printf("🔍 [%d/%d] Analyzing %s (%s)\n", i+1, len(statements), s.LocalCode, companyName)
-			
-			time.Sleep(5 * time.Second)
 
-			eval, err := analyzer.Analyze(ctx, s)
+			// time.Sleep(5 * time.Second)
+
+			var eval *agent.Evaluation
+			var err error
+
+			for attempt := 1; attempt <= MaxRetries; attempt++ {
+				eval, err = analyzer.Analyze(ctx, s)
+
+				if err == nil {
+					break
+				}
+
+				// 失敗: エラーの内容に応じてログを出力
+				log.Printf("❌ Attempt %d failed for %s. Error: %v", attempt, s.LocalCode, err)
+
+				if attempt < MaxRetries {
+					// リトライ前に短い時間待つ (指数バックオフのイメージ)
+					// API overload対策
+					waitTime := time.Duration(attempt) * 2 * time.Second // 2秒, 4秒, ...
+					log.Printf("   -> Retrying in %v...", waitTime)
+					time.Sleep(waitTime)
+				}
+			}
+
 			if err != nil {
-				log.Printf("❌ Error: %v", err)
+				// 最大リトライ回数を超えても失敗した場合
+				log.Printf("❌ FAILED to analyze %s after %d attempts.", s.LocalCode, MaxRetries)
 				continue
 			}
 
@@ -94,9 +122,11 @@ func main() {
 			} else {
 				fmt.Printf("   📈 Technicals: (Not checked)\n")
 			}
-			
+
 			icon := "💤"
-			if eval.Action == "BUY" { icon = "🚀" }
+			if eval.Action == "BUY" {
+				icon = "🚀"
+			}
 			fmt.Printf("   🤖 Decision: %s %s (Conf: %.2f)\n", icon, eval.Action, eval.Confidence)
 			fmt.Printf("      Reason: %s\n", eval.Reasoning)
 
